@@ -26,10 +26,6 @@ function HomeContent() {
   const [priceFilter, setPriceFilter] = useState<PriceFilter>("指定なし");
   const [amenityFilters, setAmenityFilters] = useState<string[]>([]);
   
-  // 現在地関連の状態
-  const [currentLocation, setCurrentLocation] = useState<Coordinates | null>(null);
-  const [isGettingLocation, setIsGettingLocation] = useState(false);
-  const [useCurrentLocation, setUseCurrentLocation] = useState(false);
   // 当日空きのみ表示のため日付選択は削除
   const [adultNum, setAdultNum] = useState<number>(2);
   const [displayCount, setDisplayCount] = useState<number>(30);
@@ -154,13 +150,8 @@ function HomeContent() {
       // 当日空室検索API用のパラメータ
       const apiParams = new URLSearchParams();
       
-      // 座標検索の設定（現在地 > エリアフィルタの優先順位）
-      if (useCurrentLocation && currentLocation) {
-        // 現在地を使用
-        apiParams.set("lat", currentLocation.lat.toString());
-        apiParams.set("lng", currentLocation.lng.toString());
-        // 現在地検索時も3km固定
-      } else if (areaFilter !== "全て") {
+      // エリアフィルタ検索の設定
+      if (areaFilter !== "全て") {
         // エリアフィルタを使用
         const areaMap = {
           "新宿": "shinjuku",
@@ -241,7 +232,6 @@ function HomeContent() {
           area: areaFilter !== "全て" ? areaFilter : undefined,
           priceFilter: priceFilter !== "指定なし" ? priceFilter : undefined,
           amenities: amenityFilters,
-          useCurrentLocation,
           resultCount: filteredItems.length,
         });
         
@@ -260,7 +250,7 @@ function HomeContent() {
       setLoading(false);
       setAbortController(null);
     }
-  }, [areaFilter, priceFilter, amenityFilters, displayCount, adultNum, abortController, useCurrentLocation, currentLocation]);
+  }, [areaFilter, priceFilter, amenityFilters, displayCount, adultNum, abortController]);
   
   // デバウンス付きでAPIを呼び出し
   useEffect(() => {
@@ -286,40 +276,6 @@ function HomeContent() {
     setAmenityFilters(newAmenities);
     setDisplayCount(30);
     updateURL({ amenities: newAmenities, count: 30 });
-  };
-
-  // 現在地取得関数
-  const handleGetCurrentLocation = async () => {
-    setIsGettingLocation(true);
-    try {
-      if (!navigator.geolocation) {
-        throw new Error('位置情報がサポートされていません');
-      }
-      
-      const position = await new Promise<GeolocationPosition>((resolve, reject) => {
-        navigator.geolocation.getCurrentPosition(resolve, reject, {
-          enableHighAccuracy: true,
-          timeout: 10000,
-          maximumAge: 300000
-        });
-      });
-      
-      setCurrentLocation({
-        lat: position.coords.latitude,
-        lng: position.coords.longitude
-      });
-      setUseCurrentLocation(true);
-      
-      // アナリティクス追跡
-      trackLocationUsage(true);
-    } catch (error) {
-      console.error("位置情報取得エラー:", error);
-      
-      // エラーをアナリティクスに送信
-      trackLocationUsage(false, (error as Error).message);
-    } finally {
-      setIsGettingLocation(false);
-    }
   };
 
   const handleResetFilters = () => {
@@ -441,66 +397,6 @@ function HomeContent() {
                    </div>
           </div>
 
-          {/* 現在地から探すセクション */}
-          <div className="py-4">
-            <div className="flex justify-center space-x-3">
-              <button
-                onClick={handleGetCurrentLocation}
-                disabled={isGettingLocation || useCurrentLocation}
-                className="px-8 py-4 bg-gradient-to-r from-blue-500 to-blue-600 text-white font-semibold rounded-xl hover:from-blue-600 hover:to-blue-700 focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 flex items-center justify-center space-x-3 shadow-lg text-lg min-w-[200px]"
-              >
-                {isGettingLocation ? (
-                  <>
-                    <div className="animate-spin rounded-full h-5 w-5 border-2 border-white border-t-transparent"></div>
-                    <span>取得中...</span>
-                  </>
-                ) : useCurrentLocation ? (
-                  <>
-                    <span>✅</span>
-                    <span>使用中</span>
-                  </>
-                ) : (
-                  <>
-                    <span>📍</span>
-                    <span>現在地から探す</span>
-                  </>
-                )}
-              </button>
-              
-              {/* リセットボタン */}
-              {useCurrentLocation && (
-                <button
-                  onClick={() => {
-                    setUseCurrentLocation(false);
-                    setCurrentLocation(null);
-                    handleAreaChange("全て");
-                  }}
-                  className="px-4 py-4 bg-gray-500 text-white font-semibold rounded-xl hover:bg-gray-600 focus:ring-2 focus:ring-gray-500 focus:ring-offset-2 transition-all duration-200 flex items-center justify-center shadow-lg text-lg"
-                  title="現在地検索を解除"
-                >
-                  ✕
-                </button>
-              )}
-            </div>
-            
-            {/* ステータス表示 */}
-            {useCurrentLocation && currentLocation && (
-              <div className="mt-4 p-3 bg-green-100 rounded-lg">
-                <p className="text-sm text-green-700 flex items-center justify-center">
-                  ✅ 現在地周辺のホテルを表示中
-                </p>
-              </div>
-            )}
-            
-            {isGettingLocation && (
-              <div className="mt-4 p-3 bg-blue-100 rounded-lg">
-                <p className="text-sm text-blue-700 flex items-center justify-center">
-                  📍 位置情報を取得中...しばらくお待ちください
-                </p>
-              </div>
-            )}
-          </div>
-
           <div>
             <h4 className="text-base font-semibold text-gray-900 mb-4">🔍 詳細検索</h4>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -542,20 +438,13 @@ function HomeContent() {
                 {/* デスクトップ表示: 通常のプルダウン */}
                 <div className="hidden md:block space-y-2">
                   <select
-                    value={useCurrentLocation ? "現在地" : areaFilter}
+                    value={areaFilter}
                     onChange={(e) => {
-                      if (e.target.value === "現在地") {
-                        handleGetCurrentLocation();
-                      } else {
-                        setUseCurrentLocation(false);
-                        handleAreaChange(e.target.value as AreaFilter);
-                      }
+                      handleAreaChange(e.target.value as AreaFilter);
                     }}
-                    disabled={isGettingLocation}
-                    className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent shadow-sm disabled:opacity-50 text-gray-900"
+                    className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent shadow-sm text-gray-900"
                   >
                     <option value="全て">全て</option>
-                    <option value="現在地">📍 現在地から検索</option>
                     <option value="新宿">新宿</option>
                     <option value="渋谷">渋谷</option>
                     <option value="上野">上野</option>
@@ -563,32 +452,8 @@ function HomeContent() {
                     <option value="池袋">池袋</option>
                     <option value="六本木">六本木</option>
                   </select>
+                </div>
 
-                  
-                  {useCurrentLocation && currentLocation && (
-                    <p className="text-xs text-green-600 flex items-center mt-1">
-                      ✅ 現在地周辺のホテルを表示中 (半径2km)
-                    </p>
-                  )}
-                  {isGettingLocation && (
-                    <p className="text-xs text-blue-600 flex items-center">
-                      📍 位置情報を取得中...
-                    </p>
-                  )}
-                </div>
-                {/* スマホ表示: ステータス表示 */}
-                <div className="md:hidden">
-                  {useCurrentLocation && currentLocation && (
-                    <p className="text-xs text-green-600 flex items-center mt-1">
-                      ✅ 現在地周辺のホテルを表示中 (半径2km)
-                    </p>
-                  )}
-                  {isGettingLocation && (
-                    <p className="text-xs text-blue-600 flex items-center mt-1">
-                      📍 位置情報を取得中...
-                    </p>
-                  )}
-                </div>
               </div>
 
               {/* 価格帯フィルタ */}
