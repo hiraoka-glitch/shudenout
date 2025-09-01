@@ -27,9 +27,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
       </head>
       <body className={inter.className}>
-        <main id="main">
-          {children}
-        </main>
+        <div id="__app" className="min-h-screen bg-white text-slate-900">
+          <main id="main">
+            {children}
+          </main>
+        </div>
         <footer style={{ 
           textAlign: 'center', 
           padding: '20px', 

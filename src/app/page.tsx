@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { coerceSearchMode, type SearchMode, SEARCH_MODE_OPTIONS } from '@/lib/searchMode';
+import { normalizeHotels, debugNormalization, type HotelItem, type NormalizedHotels } from '@/lib/normalizeHotels';
 import { SafeSelect } from '@/app/components/SafeSelect';
 import HotelCard from '@/app/components/HotelCard';
 import { Safe } from '@/app/components/Safe';
@@ -30,6 +31,7 @@ export default function Page() {
   const mode = coerceSearchMode(rawMode, DEFAULT_MODE);
   
   const [state, setState] = useState<UiState>('loading');
+  const [items, setItems] = useState<HotelItem[]>([]);
   const [payload, setPayload] = useState<any>(null);
   const [debugMode, setDebugMode] = useState<boolean>(false);
 
@@ -63,15 +65,23 @@ export default function Page() {
     setDebugMode(params.has('debug'));
   }, []);
 
-  async function query(radius: number) {
+  async function query(radius: number): Promise<{ raw: any; normalized: NormalizedHotels }> {
     try {
       const url = `/api/hotels?radius=${radius}&area=shinjuku&lat=35.690921&lng=139.700258${debugMode ? '&inspect=1' : ''}`;
       const res = await fetch(url, { cache: 'no-store' });
-      const json = await res.json().catch(() => ({}));
-      return json;
+      const raw = await res.json().catch(() => ({}));
+      
+      // デバッグモード時のログ
+      if (debugMode) {
+        debugNormalization(raw);
+      }
+      
+      const normalized = normalizeHotels(raw);
+      return { raw, normalized };
     } catch (error) {
       console.error('[query-error]', error);
-      return null;
+      const fallback = { items: [], statusClass: 'fetch_error', ok: false };
+      return { raw: null, normalized: fallback };
     }
   }
 
@@ -85,41 +95,37 @@ export default function Page() {
         const r3 = await query(3);
         if (aborted) return;
 
-        const classify = (j: any): UiState => {
-          if (!j) return 'fetch_error';
-          if (j.success && j.items?.length > 0) return 'ok_with_results';
-          if (j.success && (!j.items || j.items.length === 0)) return 'ok_no_results';
-          if (j.error?.includes('param') || j.error?.includes('invalid')) return 'param_invalid';
-          if (j.error?.includes('rate') || j.error?.includes('limit')) return 'rate_limit';
-          if (j.error?.includes('server') || j.error?.includes('500')) return 'server_error';
+        const classify = (normalized: NormalizedHotels): UiState => {
+          if (!normalized) return 'fetch_error';
+          if (normalized.ok && normalized.items.length > 0) return 'ok_with_results';
+          if (normalized.ok && normalized.items.length === 0) return 'ok_no_results';
+          if (normalized.statusClass === 'param_invalid') return 'param_invalid';
+          if (normalized.statusClass === 'rate_limit') return 'rate_limit';
+          if (normalized.statusClass === 'server_error') return 'server_error';
           return 'fetch_error';
         };
 
-        let s = classify(r3);
-        let p = r3;
+        let finalResult = r3;
 
         // 自動半径拡大（3 → 5 → 10）
-        if (s === 'ok_no_results') {
+        if (r3.normalized.ok && r3.normalized.items.length === 0) {
           setState('loading'); // 拡大中の表示更新
           const r5 = await query(5);
-          if (!aborted) {
-            const s5 = classify(r5);
-            if (s5 === 'ok_with_results') {
-              s = s5; p = r5;
-            } else if (s5 === 'ok_no_results') {
-              setState('loading'); // さらに拡大中
-              const r10 = await query(10);
-              if (!aborted) {
-                const s10 = classify(r10);
-                if (s10 === 'ok_with_results') { s = s10; p = r10; }
-              }
-            } else { s = s5; p = r5; }
+          if (!aborted && r5.normalized.items.length > 0) {
+            finalResult = r5;
+          } else if (!aborted && r5.normalized.items.length === 0) {
+            setState('loading'); // さらに拡大中
+            const r10 = await query(10);
+            if (!aborted && r10.normalized.items.length > 0) {
+              finalResult = r10;
+            }
           }
         }
 
         if (!aborted) {
-          setPayload(p);
-          setState(s);
+          setItems(finalResult.normalized.items);
+          setPayload(finalResult.raw);
+          setState(classify(finalResult.normalized));
         }
       } catch (e) {
         console.error('[client-fetch-error]', e);
@@ -185,19 +191,20 @@ export default function Page() {
           <>
             <div className="mb-6">
               <p className="text-sm text-gray-600">
-                {payload?.items?.length || 0}件の空室ありホテルが見つかりました
+                {items.length}件の空室ありホテルが見つかりました
                 {plain && <span className="ml-2 text-xs text-gray-500">（プレーンビュー）</span>}
               </p>
             </div>
             
             {plain ? (
-              // プレーンビュー: 名前+価格+リンクのみ（安全な配列アクセス）
+              // プレーンビュー: 名前+価格+リンクのみ（正規化されたitems使用）
               <ul className="space-y-2">
-                {Array.isArray(payload?.items) ? payload.items.map((hotel: any, index: number) => (
-                  <li key={hotel.hotelNo || index} className="flex gap-2 items-center border-b pb-2">
-                    <span className="font-medium flex-1">{hotel.hotelName || '名称不明'}</span>
+                {items.filter(Boolean).map((hotel: HotelItem, index: number) => (
+                  <li key={hotel.id || index} className="flex gap-2 items-center border-b pb-2">
+                    <span className="font-medium flex-1">{hotel.name || hotel.hotelName || '名称不明'}</span>
                     <span className="text-sm text-gray-600">
-                      {Number.isFinite(hotel.hotelMinCharge) ? `¥${hotel.hotelMinCharge.toLocaleString()}` : '—'}
+                      {Number.isFinite(hotel.price) ? `¥${hotel.price!.toLocaleString()}` : 
+                       Number.isFinite(hotel.hotelMinCharge) ? `¥${hotel.hotelMinCharge!.toLocaleString()}` : '—'}
                     </span>
                     {hotel.affiliateUrl && typeof hotel.affiliateUrl === 'string' && (
                       <a 
@@ -210,17 +217,17 @@ export default function Page() {
                       </a>
                     )}
                   </li>
-                )) : []}
+                ))}
               </ul>
             ) : (
-              // 通常ビュー: HotelCard使用（安全な配列アクセス）
+              // 通常ビュー: HotelCard使用（正規化されたitems使用）
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {Array.isArray(payload?.items) ? payload.items.map((hotel: any, index: number) => (
+                {items.filter(Boolean).map((hotel: HotelItem, index: number) => (
                   <Safe 
-                    key={hotel.hotelNo || index} 
+                    key={hotel.id || index} 
                     fallback={
                       <div className="p-3 rounded border border-red-200 bg-red-50 text-xs text-red-600">
-                        このカードの描画に失敗しました（id:{hotel.hotelNo || index}）
+                        このカードの描画に失敗しました（id:{hotel.id || index}）
                       </div>
                     }
                   >
