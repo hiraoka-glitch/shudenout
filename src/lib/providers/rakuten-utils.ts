@@ -31,11 +31,11 @@ interface Hotel {
  * 楽天VacantHotelSearchレスポンスをHotel型に変換
  */
 export function transformRakutenHotel(
-  rakutenHotel: any, 
+  rakutenHotel: Record<string, unknown>, 
   area: string = 'その他',
   options: { checkinDate: string; checkoutDate: string; adultNum: number }
 ): Hotel {
-  const hotelInfo = rakutenHotel.hotel[0].hotelBasicInfo;
+  const hotelInfo = (rakutenHotel.hotel as any[])[0].hotelBasicInfo;
   
   // 設備推定（実際のAPIでは詳細設備情報が限定的）
   const amenities: string[] = [];
@@ -74,12 +74,12 @@ export function transformRakutenHotel(
 /**
  * 楽天VacantHotelSearchのJSONレスポンスからHotel配列に変換
  */
-export function mapVacantJsonToHotels(json: any): Hotel[] {
+export function mapVacantJsonToHotels(json: Record<string, unknown>): Hotel[] {
   if (!json || !json.hotels || !Array.isArray(json.hotels)) {
     return [];
   }
   
-  return json.hotels.map((hotelData: any) => transformRakutenHotel(hotelData, 'VacantSearch', {
+  return json.hotels.map((hotelData: Record<string, unknown>) => transformRakutenHotel(hotelData, 'VacantSearch', {
     checkinDate: '',
     checkoutDate: '',
     adultNum: 2
@@ -151,7 +151,7 @@ export function normalizeToHotelDetailUrl(url: string, hotelId?: string): string
 /**
  * SimpleHotelSearchのJSONレスポンスから候補ホテルNo配列に変換
  */
-export function mapHotelSearchJsonToCandidates(json: any): string[] {
+export function mapHotelSearchJsonToCandidates(json: Record<string, unknown>): string[] {
   if (!json || !json.hotels || !Array.isArray(json.hotels)) {
     return [];
   }

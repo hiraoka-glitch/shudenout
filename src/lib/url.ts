@@ -1,10 +1,6 @@
 // 楽天ホテルリンクの安全性チェック・URL正規化
 
-const ALLOWED_DOMAINS = [
-  'travel.rakuten.co.jp',
-  'hotel.travel.rakuten.co.jp',
-  'hb.afl.rakuten.co.jp'
-];
+
 
 // 画像APIのURLかどうかを判定する
 export function isImageApiUrl(url: string): boolean {

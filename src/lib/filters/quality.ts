@@ -75,12 +75,10 @@ export function isQualityHotel(hotel: Hotel): boolean {
  * @returns 品質基準を満たすホテルのみ
  */
 export function filterQualityHotels(hotels: Hotel[]): Hotel[] {
-  const originalCount = hotels.length;
   const filteredHotels = hotels.filter(hotel => isQualityHotel(hotel));
-  const filteredCount = filteredHotels.length;
-  const excludedCount = originalCount - filteredCount;
   
-  // console.log(`📊 品質フィルター結果: ${originalCount}件 → ${filteredCount}件 (${excludedCount}件除外)`);
+  // 警告解消のための変更：未使用の統計変数を削除
+  // console.log(`📊 品質フィルター結果: ${hotels.length}件 → ${filteredHotels.length}件除外後`);
   
   return filteredHotels;
 }

@@ -1,0 +1,290 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { todayTomorrowJST } from '../../../lib/date';
+
+// Force dynamic rendering and use Node.js runtime
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
+interface DiagnosticResponse {
+  env: {
+    hasAppId: boolean;
+    nodeEnv: string;
+    runtime: string;
+  };
+  timing: {
+    serverTime: string;
+    timezone: string;
+  };
+  tonight: {
+    checkin: string;
+    checkout: string;
+    generatedAt: string;
+  };
+  tests: {
+    simpleHotelSearch: {
+      status: number;
+      success: boolean;
+      bodySnippet: string;
+      error?: string;
+      elapsedMs: number;
+    };
+    vacantHotelSearch: {
+      status: number;
+      success: boolean;
+      bodySnippet: string;
+      error?: string;
+      elapsedMs: number;
+    };
+  };
+  headers?: Record<string, string>; // Edge/Node判定用
+  meta: {
+    vercel: {
+      env: string | null;
+      region: string | null;
+      url: string | null;
+      gitCommitSha: string | null;
+      gitCommitRef: string | null;
+      buildTime: string | null;
+    };
+    build: {
+      timestamp: string;
+      shortSha: string;
+      deployEnvironment: string;
+    };
+  };
+}
+
+// 安全なfetch（タイムアウト付き）
+async function safeFetch(url: string, timeoutMs: number = 5000): Promise<{
+  status: number;
+  bodySnippet: string;
+  error?: string;
+  elapsedMs: number;
+}> {
+  const startTime = Date.now();
+  
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    
+    const response = await fetch(url, {
+      signal: controller.signal,
+      cache: 'no-store',
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'shudenout-diag/1.0'
+      }
+    });
+    
+    clearTimeout(timeoutId);
+    
+    const text = await response.text();
+    const bodySnippet = text.slice(0, 800); // 先頭800字
+    const elapsedMs = Date.now() - startTime;
+    
+    return {
+      status: response.status,
+      bodySnippet,
+      elapsedMs
+    };
+  } catch (error) {
+    const elapsedMs = Date.now() - startTime;
+    return {
+      status: 0,
+      bodySnippet: '',
+      error: error instanceof Error ? error.message : String(error),
+      elapsedMs
+    };
+  }
+}
+
+export async function GET(request: NextRequest) {
+  const startTime = Date.now();
+  
+  try {
+    // 環境変数チェック
+    const hasAppId = !!process.env.RAKUTEN_APP_ID;
+    const nodeEnv = process.env.NODE_ENV || 'unknown';
+    const rakutenAppId = process.env.RAKUTEN_APP_ID || 'missing';
+    
+    // JST現在時刻と日付生成
+    const serverTime = new Date().toISOString();
+    let checkinDate = '2025-09-01';
+    let checkoutDate = '2025-09-02';
+    let dateGeneratedAt = serverTime;
+    
+    try {
+      const dates = todayTomorrowJST();
+      checkinDate = dates.today;
+      checkoutDate = dates.tomorrow;
+      dateGeneratedAt = new Date().toISOString();
+    } catch (dateError) {
+      console.warn('⚠️ Date generation error:', dateError);
+    }
+    
+    // リクエストヘッダー情報（Edge/Node判定用）
+    const headers: Record<string, string> = {};
+    request.headers.forEach((value, key) => {
+      if (key.toLowerCase().includes('vercel') || 
+          key.toLowerCase().includes('x-') ||
+          key === 'user-agent') {
+        headers[key] = value;
+      }
+    });
+    
+    // テスト用パラメータ（新宿駅周辺）
+    const testParams = {
+      applicationId: rakutenAppId,
+      latitude: '35.690921',
+      longitude: '139.700258',
+      searchRadius: '3.0',
+      datumType: '1',
+      hits: '10',
+      page: '1'
+    };
+    
+    // SimpleHotelSearch テスト
+    const simpleTestUrl = `https://app.rakuten.co.jp/services/api/Travel/SimpleHotelSearch/20170426?${new URLSearchParams({
+      ...testParams,
+      responseType: 'small'
+    })}`;
+    
+    const simpleResult = await safeFetch(simpleTestUrl);
+    
+    // VacantHotelSearch テスト
+    const vacantTestUrl = `https://app.rakuten.co.jp/services/api/Travel/VacantHotelSearch/20170426?${new URLSearchParams({
+      ...testParams,
+      checkinDate,
+      checkoutDate,
+      adultNum: '2',
+      roomNum: '1',
+      sort: '+roomCharge'
+    })}`;
+    
+    const vacantResult = await safeFetch(vacantTestUrl);
+    
+    // ビルドメタ情報生成
+    const gitCommitSha = process.env.VERCEL_GIT_COMMIT_SHA ?? null;
+    const shortSha = gitCommitSha?.slice(0, 7) ?? 'local';
+    const deployEnvironment = process.env.VERCEL_ENV ?? 'development';
+    
+    const meta = {
+      vercel: {
+        env: process.env.VERCEL_ENV ?? null,
+        region: process.env.VERCEL_REGION ?? null,
+        url: process.env.VERCEL_URL ?? null,
+        gitCommitSha,
+        gitCommitRef: process.env.VERCEL_GIT_COMMIT_REF ?? null,
+        buildTime: process.env.VERCEL_BUILD_TIME ?? null,
+      },
+      build: {
+        timestamp: new Date().toISOString(),
+        shortSha,
+        deployEnvironment,
+      }
+    };
+    
+    // 診断結果レスポンス
+    const diagnostic: DiagnosticResponse = {
+      env: {
+        hasAppId,
+        nodeEnv,
+        runtime: 'nodejs'
+      },
+      timing: {
+        serverTime,
+        timezone: 'Asia/Tokyo (JST)'
+      },
+      tonight: {
+        checkin: checkinDate,
+        checkout: checkoutDate,
+        generatedAt: dateGeneratedAt
+      },
+      tests: {
+        simpleHotelSearch: {
+          status: simpleResult.status,
+          success: simpleResult.status === 200 && !simpleResult.error,
+          bodySnippet: simpleResult.bodySnippet,
+          ...(simpleResult.error && { error: simpleResult.error }),
+          elapsedMs: simpleResult.elapsedMs
+        },
+        vacantHotelSearch: {
+          status: vacantResult.status,
+          success: vacantResult.status === 200 && !vacantResult.error,
+          bodySnippet: vacantResult.bodySnippet,
+          ...(vacantResult.error && { error: vacantResult.error }),
+          elapsedMs: vacantResult.elapsedMs
+        }
+      },
+      headers,
+      meta
+    };
+    
+    return NextResponse.json(diagnostic, {
+      status: 200,
+      headers: {
+        'Cache-Control': 'no-store, max-age=0',
+        'Content-Type': 'application/json'
+      }
+    });
+    
+  } catch (error) {
+    // 最終セーフティネット
+    const elapsedMs = Date.now() - startTime;
+    console.error('❌ Diagnostic API error:', error);
+    
+    const errorDiagnostic: DiagnosticResponse = {
+      env: {
+        hasAppId: false,
+        nodeEnv: 'error',
+        runtime: 'unknown'
+      },
+      timing: {
+        serverTime: new Date().toISOString(),
+        timezone: 'Asia/Tokyo (JST)'
+      },
+      tonight: {
+        checkin: '2025-09-01',
+        checkout: '2025-09-02',
+        generatedAt: new Date().toISOString()
+      },
+      tests: {
+        simpleHotelSearch: {
+          status: 0,
+          success: false,
+          bodySnippet: '',
+          error: 'Diagnostic error occurred',
+          elapsedMs
+        },
+        vacantHotelSearch: {
+          status: 0,
+          success: false,
+          bodySnippet: '',
+          error: 'Diagnostic error occurred',
+          elapsedMs
+        }
+      },
+      meta: {
+        vercel: {
+          env: process.env.VERCEL_ENV ?? null,
+          region: process.env.VERCEL_REGION ?? null,
+          url: process.env.VERCEL_URL ?? null,
+          gitCommitSha: process.env.VERCEL_GIT_COMMIT_SHA ?? null,
+          gitCommitRef: process.env.VERCEL_GIT_COMMIT_REF ?? null,
+          buildTime: process.env.VERCEL_BUILD_TIME ?? null,
+        },
+        build: {
+          timestamp: new Date().toISOString(),
+          shortSha: process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) ?? 'error',
+          deployEnvironment: process.env.VERCEL_ENV ?? 'error',
+        }
+      }
+    };
+    
+    return NextResponse.json(errorDiagnostic, {
+      status: 200,
+      headers: { 'Cache-Control': 'no-store' }
+    });
+  }
+}

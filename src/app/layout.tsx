@@ -1,53 +1,44 @@
-import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
-import Footer from "@/app/components/Footer";
-import StructuredData from "@/app/components/StructuredData";
-import GoogleAnalytics from "@/app/components/GoogleAnalytics";
-import { generateMetadata, generateStructuredData } from "@/lib/seo";
-import "./globals.css";
+import { inter } from './fonts';
+import FooterBuild from './components/FooterBuild';
+import './globals.css';
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
-
-// SEO最適化されたメタデータ
-export const metadata: Metadata = generateMetadata({
-  canonical: "/",
-});
-
-export const viewport = {
-  width: "device-width",
-  initialScale: 1,
-};
-
-export default function RootLayout({
-  children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
-  // 構造化データ
-  const websiteStructuredData = generateStructuredData("website");
-
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="ja">
       <head>
-        <StructuredData data={websiteStructuredData} />
+        <meta charSet="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>終電後にすぐ泊まれる宿</title>
+        <meta name="description" content="本日空室ありのホテルのみ表示" />
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{
+            __html: JSON.stringify({
+              "@context": "https://schema.org",
+              "@type": "WebSite", 
+              "name": "終電後にすぐ泊まれる宿",
+              "description": "本日空室ありのホテルのみ表示"
+            }, null, 2),
+          }}
+        />
       </head>
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased min-h-screen bg-gray-50`}
-      >
-        <GoogleAnalytics />
-        {/* Header削除済み - 当日空室検索ではシンプル表示 */}
+      <body className={inter.className}>
         <main id="main">
           {children}
         </main>
-        <Footer />
+        <footer style={{ 
+          textAlign: 'center', 
+          padding: '20px', 
+          borderTop: '1px solid #ccc', 
+          marginTop: '40px' 
+        }}>
+          <p>&copy; 2024 終電後にすぐ泊まれる宿. All rights reserved.</p>
+          <FooterBuild />
+        </footer>
       </body>
     </html>
   );

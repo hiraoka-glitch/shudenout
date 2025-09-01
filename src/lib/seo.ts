@@ -131,7 +131,7 @@ export function generateMetadata(config: SEOConfig = {}): Metadata {
 /**
  * 構造化データ（JSON-LD）を生成
  */
-export function generateStructuredData(type: "website" | "hotel" | "localBusiness", data?: any): object {
+export function generateStructuredData(type: "website" | "hotel" | "localBusiness", data?: Record<string, unknown>): object {
   const baseData = {
     "@context": "https://schema.org",
     "@type": type === "website" ? "WebSite" : type === "hotel" ? "Hotel" : "LocalBusiness",

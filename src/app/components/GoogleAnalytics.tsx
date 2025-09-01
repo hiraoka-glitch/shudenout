@@ -1,9 +1,7 @@
 "use client";
 
-import { useEffect } from "react";
-import { usePathname, useSearchParams } from "next/navigation";
 import Script from "next/script";
-import { GA_TRACKING_ID, trackPageView } from "@/lib/analytics";
+import { GA_TRACKING_ID } from "@/lib/analytics";
 
 export default function GoogleAnalytics() {
   // 一時的に無効化

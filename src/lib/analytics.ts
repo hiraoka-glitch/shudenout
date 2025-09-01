@@ -6,10 +6,10 @@ declare global {
       command: 'config' | 'event' | 'js' | 'set',
       targetId: string | Date,
       config?: {
-        [key: string]: any;
+        [key: string]: unknown;
       }
     ) => void;
-    dataLayer: any[];
+    dataLayer: Array<Record<string, unknown>>;
   }
 }
 
@@ -36,7 +36,7 @@ export const trackEvent = (
   category: string,
   label?: string,
   value?: number,
-  customParameters?: { [key: string]: any }
+  customParameters?: { [key: string]: unknown }
 ): void => {
   if (!isGAEnabled()) return;
 

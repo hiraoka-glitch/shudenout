@@ -1,22 +1,22 @@
-interface PendingRequest {
-  promise: Promise<any>;
+interface PendingRequest<T = unknown> {
+  promise: Promise<T>;
   timestamp: number;
 }
 
 class ApiOptimizer {
-  private pendingRequests = new Map<string, PendingRequest>();
+  private pendingRequests = new Map<string, PendingRequest<unknown>>();
   private readonly REQUEST_TIMEOUT = 30000; // 30秒でタイムアウト
   private readonly BATCH_DELAY = 100; // 100ms以内のリクエストをバッチ処理
   private batchQueue = new Map<string, Array<{
-    params: any;
-    resolve: (value: any) => void;
-    reject: (error: any) => void;
+    params: Record<string, unknown>;
+    resolve: (value: unknown) => void;
+    reject: (error: unknown) => void;
   }>>();
 
   /**
    * リクエストキーを生成
    */
-  private generateRequestKey(url: string, params: any): string {
+  private generateRequestKey(url: string, params: Record<string, unknown>): string {
     const sortedParams = Object.keys(params || {})
       .sort()
       .map(key => `${key}=${params[key]}`)
@@ -29,7 +29,7 @@ class ApiOptimizer {
    */
   async deduplicateRequest<T>(
     url: string, 
-    params: any, 
+    params: Record<string, unknown>, 
     fetcher: () => Promise<T>
   ): Promise<T> {
     const key = this.generateRequestKey(url, params);
@@ -40,7 +40,7 @@ class ApiOptimizer {
       // タイムアウトチェック
       if (Date.now() - existing.timestamp < this.REQUEST_TIMEOUT) {
         console.log('🔄 重複リクエスト検出、既存リクエストの結果を待機:', key);
-        return existing.promise;
+        return existing.promise as Promise<T>;
       } else {
         // タイムアウトした古いリクエストを削除
         this.pendingRequests.delete(key);
@@ -65,8 +65,8 @@ class ApiOptimizer {
    */
   async batchRequest<T>(
     batchKey: string,
-    params: any,
-    batchProcessor: (paramsList: any[]) => Promise<T[]>
+    params: Record<string, unknown>,
+    batchProcessor: (paramsList: Record<string, unknown>[]) => Promise<T[]>
   ): Promise<T> {
     return new Promise((resolve, reject) => {
       // バッチキューに追加
@@ -99,7 +99,7 @@ class ApiOptimizer {
       
       this.batchQueue.get(batchKey)!.push({
         params,
-        resolve,
+        resolve: resolve as (value: unknown) => void,
         reject
       });
     });
@@ -124,7 +124,7 @@ class ApiOptimizer {
         } else {
           console.warn(`リクエスト${i + index}でエラー:`, result.reason);
           // エラー時のフォールバック値
-          results[i + index] = null as any;
+          results[i + index] = null as T;
         }
       });
     }
@@ -137,7 +137,7 @@ class ApiOptimizer {
    */
   preloadRequest<T>(
     url: string,
-    params: any,
+    params: Record<string, unknown>,
     fetcher: () => Promise<T>
   ): void {
     const key = this.generateRequestKey(url, params);

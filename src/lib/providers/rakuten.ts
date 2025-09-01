@@ -152,34 +152,7 @@ function convertToAffiliateLink(directUrl: string, affiliateId?: string): string
   return buildAffiliateUrl(directUrl, affiliateId);
 }
 
-/**
- * URLにクエリパラメータを安全に追加
- */
-function addSearchParams(url: string, options: LinkGenerationOptions): string {
-  try {
-    const urlObj = new URL(url);
-    
-    // 既存のパラメータを上書きしないように条件付きで追加
-    if (!urlObj.searchParams.has('checkin_date') && !urlObj.searchParams.has('f_checkin')) {
-      urlObj.searchParams.set('checkin_date', options.checkinDate.replace(/-/g, ''));
-    }
-    if (!urlObj.searchParams.has('checkout_date') && !urlObj.searchParams.has('f_checkout')) {
-      urlObj.searchParams.set('checkout_date', options.checkoutDate.replace(/-/g, ''));
-    }
-    if (!urlObj.searchParams.has('adult_num') && !urlObj.searchParams.has('f_otona')) {
-      urlObj.searchParams.set('adult_num', options.adultNum.toString());
-    }
-    
-    if (options.roomNum && !urlObj.searchParams.has('room_num') && !urlObj.searchParams.has('f_heya')) {
-      urlObj.searchParams.set('room_num', options.roomNum.toString());
-    }
-    
-    return urlObj.toString();
-  } catch (error) {
-    console.warn('Failed to add parameters to URL:', url, error);
-    return url; // 元のURLをそのまま返す
-  }
-}
+
 
 /**
  * 楽天ホテルリンクを生成（ホテル詳細URLのみ使用・最終版）
@@ -355,7 +328,7 @@ export function validateRakutenLink(url: string): {
               reason: `Invalid pc parameter hostname: ${pcHostname}`
             };
           }
-  } catch (error) {
+  } catch {
           return {
             isValid: false,
             isRakutenTravel: false,
@@ -371,7 +344,7 @@ export function validateRakutenLink(url: string): {
       isRakutenTravel,
       isAffiliate
     };
-  } catch (error) {
+  } catch {
     return {
       isValid: false,
       isRakutenTravel: false,
@@ -402,7 +375,7 @@ export async function fetchCandidates(params: {
   radius?: number;
   areaCode?: string;
   rakutenAppId: string;
-}, isInspectMode: boolean = false): Promise<{
+}): Promise<{
   candidateNos: string[];
   debugInfo: {
     source: 'SimpleHotelSearch' | 'AreaCode';
@@ -419,9 +392,15 @@ export async function fetchCandidates(params: {
     totalPages: number;
   };
 }> {
-  const { lat, lng, radius = 3.0, areaCode, rakutenAppId } = params;
+  const { lat, lng, areaCode, rakutenAppId } = params;
   const hotelNos = new Set<string>();
-  const debugAttempts: any[] = [];
+  const debugAttempts: Array<{
+    page: number;
+    status: number;
+    elapsedMs: number;
+    bodySnippetHead: string;
+    foundCount: number;
+  }> = [];
   const startTime = Date.now();
 
   console.log('🔍 Stage 1: Fetching hotel candidates...');
@@ -631,11 +610,10 @@ export async function checkVacancy(
   },
   isInspectMode: boolean = false
 ): Promise<{
-  vacantHotels: any[];
+  vacantHotels: Array<Record<string, unknown>>;
   chunks: Array<{
     from: number;
     to: number;
-    hotelNos: string[];
     status: number;
     elapsedMs: number;
     foundCount: number;
@@ -645,8 +623,17 @@ export async function checkVacancy(
   }>;
 }> {
   const { checkinDate, checkoutDate, adultNum, roomNum, rakutenAppId } = params;
-  const vacantHotels: any[] = [];
-  const chunks: any[] = [];
+  const vacantHotels: Array<Record<string, unknown>> = [];
+  const chunks: Array<{
+    from: number;
+    to: number;
+    status: number;
+    elapsedMs: number;
+    foundCount: number;
+    bodySnippetHead?: string;
+    retryAttempted?: boolean;
+    retrySuccess?: boolean;
+  }> = [];
   const chunkSize = 15; // VacantHotelSearchの制限
   const maxConcurrency = 3; // 並列度を制限
 
@@ -688,7 +675,7 @@ export async function checkVacancy(
       let finalText = '';
       let retryAttempted = false;
       let retrySuccess = false;
-      let foundHotels: any[] = [];
+      let foundHotels: Array<Record<string, unknown>> = [];
 
       // 初回試行
       const t0 = Date.now();
@@ -757,7 +744,6 @@ export async function checkVacancy(
       const chunkResult = {
         from,
         to,
-        hotelNos: chunkHotelNos,
         status: finalStatus,
         elapsedMs: totalElapsedMs,
         foundCount: foundHotels.length,
@@ -772,7 +758,6 @@ export async function checkVacancy(
       chunks.push({
         from,
         to,
-        hotelNos: chunkHotelNos,
         status: 0,
         elapsedMs: 0,
         foundCount: 0,

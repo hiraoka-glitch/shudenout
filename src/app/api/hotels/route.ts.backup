@@ -1,0 +1,403 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { todayTomorrowJST } from '@/lib/date';
+import { fetchCandidates, checkVacancy } from '@/lib/providers/rakuten';
+import { mapVacantJsonToHotels } from '@/lib/providers/rakuten-utils';
+
+// Force dynamic rendering and use Node.js runtime
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
+// ホテル型定義
+interface Hotel {
+  id: string;
+  name: string;
+  price: number;
+  rating?: number;
+  imageUrl: string;
+  affiliateUrl: string;
+  area: string;
+  nearest: string;
+  amenities: string[];
+  latitude?: number;
+  longitude?: number;
+  distanceKm?: number;
+  walkingTimeMinutes?: number;
+  isSameDayAvailable: boolean;
+}
+
+// エリア座標マッピング（標準化された緯度経度検索用）
+const AREA_COORDINATES: Record<string, { lat: number; lng: number; name: string }> = {
+  'shinjuku': { lat: 35.690921, lng: 139.700258, name: '新宿' },
+  'shibuya': { lat: 35.6580, lng: 139.7016, name: '渋谷' },
+  'ueno': { lat: 35.7141, lng: 139.7774, name: '上野' },
+  'shinbashi': { lat: 35.6662, lng: 139.7580, name: '新橋' },
+  'ikebukuro': { lat: 35.7295, lng: 139.7109, name: '池袋' },
+  'roppongi': { lat: 35.6627, lng: 139.7314, name: '六本木' }
+};
+
+// デフォルト検索中心（新宿駅）
+const DEFAULT_SEARCH_CENTER = { lat: 35.690921, lng: 139.700258, name: '新宿駅周辺' };
+
+function jsonResponse(data: Record<string, unknown>, status: number = 200): NextResponse {
+  const response = NextResponse.json(data, { status });
+  response.headers.set('Cache-Control', 'no-store');
+  return response;
+}
+
+export async function GET(request: NextRequest) {
+  const startTime = Date.now();
+  
+  // 統一レスポンススキーマ（常に同じ形を保証）
+  const createResponse = (
+    items: Hotel[] = [],
+    success: boolean = true,
+    error: string | null = null,
+    message: string | null = null,
+    debugInfo: Record<string, unknown> | undefined = undefined,
+    areaName: string = '新宿駅周辺'
+  ) => {
+    try {
+      const { today, tomorrow } = todayTomorrowJST();
+      return {
+        items: Array.isArray(items) ? items : [],
+        paging: {
+          total: Array.isArray(items) ? items.length : 0,
+          page: 1,
+          totalPages: 1,
+          hasNext: false
+        },
+        isSample: false,
+        fallback: false,
+        searchParams: {
+          area: areaName,
+          checkinDate: today,
+          checkoutDate: tomorrow,
+          adultNum: 2,
+          isVacantSearch: true
+        },
+        message,
+        success,
+        error,
+        ...(debugInfo ? { debug: debugInfo } : {})
+      };
+    } catch (dateError) {
+      console.error('❌ Date creation error:', dateError);
+      return {
+        items: [],
+        paging: { total: 0, page: 1, totalPages: 0, hasNext: false },
+        isSample: false,
+        fallback: false,
+        searchParams: {
+          area: areaName,
+          checkinDate: '2025-08-30',
+          checkoutDate: '2025-08-31',
+          adultNum: 2,
+          isVacantSearch: true
+        },
+        message,
+        success,
+        error
+      };
+    }
+  };
+
+  try {
+    // パラメータ解析（try/catch で守る）
+    let areaParam = 'all';
+    let priceMin: number | undefined;
+    let priceMax: number | undefined;
+    let amenities: string[] = [];
+    let adultNum = 2;
+    let isInspectMode = false;
+    let searchParams: URLSearchParams;
+    
+    try {
+      const url = new URL(request.url);
+      searchParams = url.searchParams;
+      areaParam = searchParams.get('area') || 'all';
+      priceMin = searchParams.get('priceMin') ? parseInt(searchParams.get('priceMin')!) : undefined;
+      priceMax = searchParams.get('priceMax') ? parseInt(searchParams.get('priceMax')!) : undefined;
+      amenities = searchParams.get('amenities')?.split(',').filter(Boolean) || [];
+      adultNum = Math.max(1, Math.min(4, parseInt(searchParams.get('adults') || '2')));
+      isInspectMode = searchParams.get('inspect') === '1';
+    } catch (parseError) {
+      console.warn('⚠️ Parameter parsing error, using defaults:', parseError);
+      // searchParamsがundefinedの場合のフォールバック
+      searchParams = new URLSearchParams();
+    }
+    
+    // 座標解析（try/catch で守る）
+    let searchCenter = DEFAULT_SEARCH_CENTER;
+    let areaName = '新宿駅周辺';
+    
+    try {
+      const lat = searchParams.get('lat');
+      const lng = searchParams.get('lng');
+      
+      if (lat && lng) {
+        const latitude = parseFloat(lat);
+        const longitude = parseFloat(lng);
+        if (!isNaN(latitude) && !isNaN(longitude)) {
+          searchCenter = { lat: latitude, lng: longitude, name: '指定座標周辺' };
+          areaName = '指定座標周辺';
+        }
+      } else if (areaParam !== 'all' && AREA_COORDINATES[areaParam]) {
+        searchCenter = AREA_COORDINATES[areaParam];
+        areaName = searchCenter.name;
+      }
+    } catch (coordError) {
+      console.warn('⚠️ Coordinate parsing error, using default:', coordError);
+    }
+    
+    // 固定パラメータ
+    const radiusKm = 3.0;
+    let today = '2025-08-30';
+    let tomorrow = '2025-08-31';
+    
+    try {
+      const dates = todayTomorrowJST();
+      today = dates.today;
+      tomorrow = dates.tomorrow;
+    } catch (dateError) {
+      console.warn('⚠️ Date parsing error, using fallback:', dateError);
+    }
+    
+    // 標準化されたリクエスト情報をログ出力
+    const standardizedRequest = {
+      originalArea: areaParam,
+      resolvedAreaName: areaName,
+      coordinates: { lat: searchCenter.lat, lng: searchCenter.lng },
+      searchRadius: radiusKm,
+      dates: { checkinDate: today, checkoutDate: tomorrow },
+      guests: { adultNum, roomNum: 1 },
+      priceRange: { minCharge: priceMin, maxCharge: priceMax },
+      amenities,
+      isInspectMode
+    };
+    
+    console.log('🏨 Standardized Hotel Search Request:', standardizedRequest);
+    
+    // Stage 0: 環境変数確認
+    const rakutenAppId = process.env.RAKUTEN_APP_ID;
+    if (!rakutenAppId) {
+      console.error('❌ RAKUTEN_APP_ID not configured');
+      return jsonResponse(createResponse(
+        [],
+        false,
+        'Missing RAKUTEN_APP_ID',
+        'APIキーが設定されていません。管理者にお問い合わせください。',
+        isInspectMode ? { error: 'Missing RAKUTEN_APP_ID' } : undefined,
+        areaName
+      ));
+    }
+
+    console.log('🔍 Starting two-stage pipeline: candidates → vacancy check...');
+    
+    // Stage 1: 候補ホテル取得（完全try/catch包囲）
+    let hotels: Hotel[] = [];
+    let debugInfo: Record<string, unknown> | undefined = undefined;
+
+    try {
+      const candidatesResult = await fetchCandidates({
+        lat: searchCenter.lat,
+        lng: searchCenter.lng,
+        radius: radiusKm,
+        areaCode: areaParam !== 'all' ? areaParam : undefined,
+        rakutenAppId
+      });
+
+      const candidateNos = candidatesResult?.candidateNos || [];
+      const candidateCount = candidateNos.length;
+      const candidateDebugInfo = candidatesResult?.debugInfo || {};
+      
+      if (candidateCount === 0) {
+        console.log('📍 No hotel candidates found in target area');
+        
+        // APIエラーと候補0件を区別する
+        const apiStatus = candidateDebugInfo.attempts?.[0]?.status || 0;
+        if (apiStatus >= 400 || apiStatus === 0) {
+          return jsonResponse(createResponse(
+            [],
+            false,
+            `Candidate API error (status: ${apiStatus})`,
+            'ホテル検索APIでエラーが発生しました。ネットワーク接続を確認し、再度お試しください。',
+            isInspectMode ? {
+              pipeline: 'two_stage',
+              candidateSource: candidateDebugInfo.source,
+              candidateParams: {
+                url: candidateDebugInfo.url || 'unknown',
+                paramsUsed: candidateDebugInfo.paramsUsed || {},
+                elapsedMs: candidateDebugInfo.totalElapsedMs || 0,
+                status: apiStatus,
+                bodySnippetHead: candidateDebugInfo.attempts?.[0]?.bodySnippetHead || 'no data'
+              },
+              candidateCount: 0,
+              vacancy: { chunkSize: 15, chunks: [] }
+            } : undefined,
+            areaName
+          ));
+        } else {
+          return jsonResponse(createResponse(
+            [],
+            true,
+            null,
+            '対象エリアで施設が見つかりませんでした。エリアを変えてお試しください。',
+            isInspectMode ? {
+              pipeline: 'two_stage',
+              candidateSource: candidateDebugInfo.source,
+              candidateParams: {
+                url: candidateDebugInfo.url || 'unknown',
+                paramsUsed: candidateDebugInfo.paramsUsed || {},
+                elapsedMs: candidateDebugInfo.totalElapsedMs || 0,
+                status: apiStatus,
+                bodySnippetHead: candidateDebugInfo.attempts?.[0]?.bodySnippetHead || 'no data'
+              },
+              candidateCount: 0,
+              vacancy: { chunkSize: 15, chunks: [] }
+            } : undefined,
+            areaName
+          ));
+        }
+      }
+
+      // Stage 2: 空室判定（完全try/catch包囲）
+      try {
+        const vacancyResult = await checkVacancy(candidateNos, {
+          checkinDate: today,
+          checkoutDate: tomorrow,
+          adultNum,
+          roomNum: 1,
+          rakutenAppId
+        });
+
+        if (vacancyResult?.vacantHotels && vacancyResult.vacantHotels.length > 0) {
+          // 空室ありホテルを変換（try/catch で守る）
+          try {
+            // vacancyResult.vacantHotelsは既にRakuten JSONオブジェクトの形式
+            const vacantJson = { hotels: vacancyResult.vacantHotels };
+            hotels = mapVacantJsonToHotels(vacantJson);
+            
+            // 価格フィルタリング（try/catch で守る）
+            try {
+              if (priceMin !== undefined || priceMax !== undefined) {
+                hotels = hotels.filter(hotel => {
+                  if (priceMin !== undefined && hotel.price < priceMin) return false;
+                  if (priceMax !== undefined && hotel.price > priceMax) return false;
+                  return true;
+                });
+              }
+            } catch (priceFilterError) {
+              console.warn('⚠️ Price filtering error:', priceFilterError);
+            }
+
+            // アメニティフィルタリング（try/catch で守る）
+            try {
+              if (amenities.length > 0) {
+                hotels = hotels.filter(hotel =>
+                  amenities.every(amenity => hotel.amenities && hotel.amenities.includes(amenity))
+                );
+              }
+            } catch (amenityFilterError) {
+              console.warn('⚠️ Amenity filtering error:', amenityFilterError);
+            }
+            
+          } catch (transformError) {
+            console.error('❌ Transformation error:', transformError);
+            hotels = [];
+          }
+        }
+
+        if (isInspectMode) {
+          try {
+            debugInfo = {
+              pipeline: 'two_stage',
+              candidateSource: candidateDebugInfo.source,
+              candidateParams: {
+                url: candidateDebugInfo.url || 'unknown',
+                paramsUsed: candidateDebugInfo.paramsUsed || {},
+                elapsedMs: candidateDebugInfo.totalElapsedMs || 0,
+                status: candidateDebugInfo.attempts?.[0]?.status || 'unknown',
+                bodySnippetHead: candidateDebugInfo.attempts?.[0]?.bodySnippetHead || 'no data'
+              },
+              candidateCount,
+              vacancy: {
+                chunkSize: 15,
+                chunks: vacancyResult?.chunks || []
+              }
+            };
+          } catch (debugError) {
+            console.warn('⚠️ Debug info creation error:', debugError);
+          }
+        }
+        
+      } catch (vacancyError) {
+        console.error('❌ Vacancy check error:', vacancyError);
+        hotels = [];
+      }
+      
+    } catch (candidateError) {
+      console.error('❌ Candidate fetch error:', candidateError);
+      return jsonResponse(createResponse(
+        [],
+        false,
+        candidateError instanceof Error ? candidateError.message : 'Candidate fetch failed',
+        '空室検索でエラーが発生しました。しばらく時間をおいて再度お試しください。',
+        isInspectMode ? {
+          pipeline: 'two_stage',
+          error: candidateError instanceof Error ? candidateError.message : 'Unknown candidate error',
+          candidateCount: 0,
+          vacancy: { chunkSize: 15, chunks: [] }
+        } : undefined,
+        areaName
+      ));
+    }
+
+    const totalElapsedMs = Date.now() - startTime;
+    console.log(`🎯 検索完了: ${hotels.length}件のホテル (時間: ${totalElapsedMs}ms)`);
+
+    // 成功レスポンス
+    const message = hotels.length > 0 
+      ? `${hotels.length}件の空室ありホテルが見つかりました`
+      : '本日の空室は見つかりません。エリアを変えてお試しください。';
+
+    return jsonResponse(createResponse(hotels, true, null, message, debugInfo, areaName));
+
+  } catch (error) {
+    const errorElapsedMs = Date.now() - startTime;
+    console.error('💥 Unhandled error in hotel search:', error);
+
+    // 最終フォールバック（絶対に成功する）
+    try {
+      const isInspectMode = request?.url ? new URL(request.url).searchParams.get('inspect') === '1' : false;
+      return jsonResponse(createResponse(
+        [],
+        false,
+        error instanceof Error ? error.message : 'Unknown system error',
+        'システムエラーが発生しました。しばらく時間をおいて再度お試しください。',
+        isInspectMode ? {
+          error: error instanceof Error ? error.message : 'Unknown error',
+          elapsedMs: errorElapsedMs
+        } : undefined
+      ));
+    } catch (fallbackError) {
+      console.error('💥 Fallback error:', fallbackError);
+      // 最後の砦：完全に静的なレスポンス
+      return NextResponse.json({
+        items: [],
+        paging: { total: 0, page: 1, totalPages: 0, hasNext: false },
+        isSample: false,
+        fallback: false,
+        searchParams: {
+          area: '新宿駅周辺',
+          checkinDate: '2025-08-30',
+          checkoutDate: '2025-08-31',
+          adultNum: 2,
+          isVacantSearch: true
+        },
+        message: 'システムエラーが発生しました。',
+        success: false,
+        error: 'Critical system error'
+      }, { status: 200 });
+    }
+  }
+}
