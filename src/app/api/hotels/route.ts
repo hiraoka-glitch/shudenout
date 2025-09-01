@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { todayTomorrowJST } from '../../../lib/date';
 import { safeFetch, isSafeMode, getAllBreakerStates, Result, Ok, Err, safeParseJson } from '../../../lib/guardrail';
 import { normalizeLatLng, isValidLatLng, detectLatLngUnit } from '@/lib/geo';
+import { AREAS, coerceArea, DEFAULT_AREA, getAreaCoords, type AreaKey } from '@/lib/areas';
 
 // Force dynamic rendering and use Node.js runtime
 export const runtime = 'nodejs';
@@ -18,8 +19,8 @@ interface HotelItem {
   area: string;
   nearest: string;
   amenities: ("WiFi" | "シャワー" | "2人可")[];
-  latitude?: number;
-  longitude?: number;
+  latitude?: number | null;
+  longitude?: number | null;
   distanceKm?: number;
   walkingTimeMinutes?: number;
   isSameDayAvailable: boolean;
@@ -42,17 +43,7 @@ interface ApiResponse {
   debug?: Record<string, unknown>;
 }
 
-// エリア座標マッピング（標準化された緯度経度検索用）
-const AREA_COORDINATES: Record<string, { lat: number; lng: number; name: string }> = {
-  'shinjuku': { lat: 35.690921, lng: 139.700258, name: '新宿' },
-  'shibuya': { lat: 35.6580, lng: 139.7016, name: '渋谷' },
-  'ueno': { lat: 35.7141, lng: 139.7774, name: '上野' },
-  'shinbashi': { lat: 35.6662, lng: 139.7580, name: '新橋' },
-  'ikebukuro': { lat: 35.7295, lng: 139.7109, name: '池袋' },
-  'roppongi': { lat: 35.6627, lng: 139.7314, name: '六本木' }
-};
-
-// デフォルト検索中心（新宿駅）
+// デフォルト検索中心（lib/areasから取得）
 const DEFAULT_SEARCH_CENTER = { lat: 35.690921, lng: 139.700258, name: '新宿駅周辺' };
 
 // サブセンター座標（フォールバック用）
@@ -528,23 +519,31 @@ export async function GET(request: NextRequest) {
   
   // 完全防御版：絶対に例外をthrowしない
   try {
-    // パラメータ解析（安全版）
+    // パラメータ解析（新エリアシステム統合版）
     let searchParams: URLSearchParams;
-    let areaParam = 'shinjuku';
+    let areaKey: AreaKey = DEFAULT_AREA;
     let adultNumParam = '2';
     let isInspectMode = false;
     
     let radiusParam = 3.0;
-    let latParam: string | null = null;
-    let lngParam: string | null = null;
+    let finalLat: number = AREAS[DEFAULT_AREA].lat;
+    let finalLng: number = AREAS[DEFAULT_AREA].lng;
     
     try {
       searchParams = request.nextUrl.searchParams;
-      areaParam = searchParams.get('area') || 'shinjuku';
+      
+      // エリア安全変換
+      areaKey = coerceArea(searchParams.get('area'));
       adultNumParam = searchParams.get('adultNum') || '2';
-      radiusParam = Number(searchParams.get('radius')) || 3.0; // 半径パラメータ追加
-      latParam = searchParams.get('lat');
-      lngParam = searchParams.get('lng');
+      radiusParam = Number(searchParams.get('radius')) || 3.0;
+      
+      // 座標取得：URL指定優先、なければエリアから
+      const latParam = searchParams.get('lat');
+      const lngParam = searchParams.get('lng');
+      const areaCoords = getAreaCoords(areaKey);
+      
+      finalLat = latParam ? Number(latParam) : areaCoords.lat;
+      finalLng = lngParam ? Number(lngParam) : areaCoords.lng;
       isInspectMode = searchParams.get('inspect') === '1';
     } catch (paramError) {
       console.warn('⚠️ Parameter parsing error, using defaults:', paramError);
@@ -576,8 +575,12 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    // 検索中心の決定
-    const searchCenter = AREA_COORDINATES[areaParam] || DEFAULT_SEARCH_CENTER;
+    // 検索中心の決定（新システム）
+    const searchCenter = {
+      lat: finalLat,
+      lng: finalLng,
+      name: getAreaCoords(areaKey).label
+    };
     const areaName = searchCenter.name;
 
     // JST日付生成（都度生成で0時跨ぎ対応）
@@ -635,7 +638,7 @@ export async function GET(request: NextRequest) {
     if (isInspectMode) {
       // 最終送信パラメータ
       const finalSearchParams = {
-        area: areaParam,
+        area: areaKey,
         adultNum: adultNumParam,
         searchCenter: {
           lat: searchCenter.lat,
@@ -646,7 +649,8 @@ export async function GET(request: NextRequest) {
           checkin: candidatesResult.hotelNos.length > 0 ? 'calculated' : 'fallback',
           checkout: candidatesResult.hotelNos.length > 0 ? 'calculated' : 'fallback'
         },
-        searchRadius: `${radiusParam}km`
+        searchRadius: `${radiusParam}km`,
+        datumType: '1'  // 度単位確認
       };
       
       // upstream詳細情報（エラー分類含む）

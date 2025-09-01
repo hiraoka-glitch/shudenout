@@ -1,9 +1,9 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
-import { coerceSearchMode, type SearchMode, SEARCH_MODE_OPTIONS } from '@/lib/searchMode';
+import { AREAS, coerceArea, DEFAULT_AREA, getAreaCoords, type AreaKey } from '@/lib/areas';
 import { normalizeHotels, debugNormalization, type HotelItem, type NormalizedHotels } from '@/lib/normalizeHotels';
-import { SafeSelect } from '@/app/components/SafeSelect';
+import { AreaSelect, AreaInfo } from '@/app/components/AreaSelect';
 import HotelCard from '@/app/components/HotelCard';
 import { Safe } from '@/app/components/Safe';
 import ErrorState from '@/app/components/ErrorState';
@@ -19,59 +19,52 @@ type UiState =
   | 'server_error'
   | 'fetch_error';
 
-const DEFAULT_MODE: SearchMode = 'area';
-
 export default function Page() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const plain = searchParams.get('plain') === '1';
   
-  // ① 安全なSearchMode取得（旧値も受け入れる）
-  const rawMode = searchParams.get('mode');
-  const mode = coerceSearchMode(rawMode, DEFAULT_MODE);
+  // ① エリア状態管理（URL ⇄ UI ⇄ フェッチ連動）
+  const urlArea = coerceArea(searchParams.get('area'));
+  const [currentArea, setCurrentArea] = useState<AreaKey>(urlArea);
+  
+  // ② 座標取得（currentAreaから動的算出）
+  const coords = useMemo(() => getAreaCoords(currentArea), [currentArea]);
   
   const [state, setState] = useState<UiState>('loading');
   const [items, setItems] = useState<HotelItem[]>([]);
   const [payload, setPayload] = useState<any>(null);
   const [debugMode, setDebugMode] = useState<boolean>(false);
 
-  // ② 無効なmodeのURL静かに修正（履歴汚さない）
-  useEffect(() => {
-    if (rawMode !== mode) {
-      const qp = new URLSearchParams(searchParams.toString());
-      qp.set('mode', mode);
-      router.replace('/?' + qp.toString(), { scroll: false });
-    }
-  }, [rawMode, mode, searchParams, router]);
+  // ③ エリア変更ハンドラー：UI選択→URL更新
+  const handleAreaChange = (newArea: AreaKey) => {
+    setCurrentArea(newArea);
+    const qp = new URLSearchParams(searchParams.toString());
+    qp.set('area', newArea);
+    router.replace('/?' + qp.toString(), { scroll: false });
+  };
 
-  // ③ localStorage旧値マイグレーション
+  // ④ URL同期：直リンク・戻るボタン対応
   useEffect(() => {
-    try {
-      const key = 'searchMode';
-      const stored = localStorage.getItem(key);
-      const migrated = coerceSearchMode(stored, DEFAULT_MODE);
-      if (stored !== migrated) {
-        console.log(`LocalStorage migration: "${stored}" → "${migrated}"`);
-        localStorage.setItem(key, migrated);
-      }
-    } catch (error) {
-      console.warn('LocalStorage migration failed:', error);
+    const coerced = coerceArea(searchParams.get('area'));
+    if (coerced !== currentArea) {
+      setCurrentArea(coerced);
     }
-  }, []);
+  }, [searchParams, currentArea]);
 
-  // URLからデバッグモード検出
+  // ⑤ デバッグモード検出
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     setDebugMode(params.has('debug'));
   }, []);
 
-  async function query(radius: number): Promise<{ raw: any; normalized: NormalizedHotels }> {
+  // ⑥ API呼び出し（エリア座標連動）
+  async function fetchHotels(radiusKm: number): Promise<{ raw: any; normalized: NormalizedHotels }> {
     try {
-      const url = `/api/hotels?radius=${radius}&area=shinjuku&lat=35.690921&lng=139.700258${debugMode ? '&inspect=1' : ''}`;
+      const url = `/api/hotels?radius=${radiusKm}&area=${currentArea}&lat=${coords.lat}&lng=${coords.lng}${debugMode ? '&inspect=1' : ''}&ts=${Date.now()}`;
       const res = await fetch(url, { cache: 'no-store' });
       const raw = await res.json().catch(() => ({}));
       
-      // デバッグモード時のログ
       if (debugMode) {
         debugNormalization(raw);
       }
@@ -79,12 +72,13 @@ export default function Page() {
       const normalized = normalizeHotels(raw);
       return { raw, normalized };
     } catch (error) {
-      console.error('[query-error]', error);
+      console.error('[fetch-error]', error);
       const fallback = { items: [], statusClass: 'fetch_error', ok: false };
       return { raw: null, normalized: fallback };
     }
   }
 
+  // ⑦ エリア変更時の自動再フェッチ（重要：currentArea, coords.lat, coords.lngに依存）
   useEffect(() => {
     let aborted = false;
 
@@ -92,9 +86,6 @@ export default function Page() {
       try {
         setState('loading');
         
-        const r3 = await query(3);
-        if (aborted) return;
-
         const classify = (normalized: NormalizedHotels): UiState => {
           if (!normalized) return 'fetch_error';
           if (normalized.ok && normalized.items.length > 0) return 'ok_with_results';
@@ -105,30 +96,28 @@ export default function Page() {
           return 'fetch_error';
         };
 
-        let finalResult = r3;
+        // 段階的半径拡大（1km → 2km → 3km）
+        const radiusSteps = [1.0, 2.0, 3.0];
+        let finalResult: { raw: any; normalized: NormalizedHotels } | null = null;
 
-        // 自動半径拡大（3 → 5 → 10）
-        if (r3.normalized.ok && r3.normalized.items.length === 0) {
-          setState('loading'); // 拡大中の表示更新
-          const r5 = await query(5);
-          if (!aborted && r5.normalized.items.length > 0) {
-            finalResult = r5;
-          } else if (!aborted && r5.normalized.items.length === 0) {
-            setState('loading'); // さらに拡大中
-            const r10 = await query(10);
-            if (!aborted && r10.normalized.items.length > 0) {
-              finalResult = r10;
-            }
+        for (const radius of radiusSteps) {
+          if (aborted) return;
+          
+          const result = await fetchHotels(radius);
+          if (result.normalized.items.length > 0) {
+            finalResult = result;
+            break;
           }
+          finalResult = result; // 最後の結果を保持（エラー情報含む）
         }
 
-        if (!aborted) {
+        if (!aborted && finalResult) {
           setItems(finalResult.normalized.items);
           setPayload(finalResult.raw);
           setState(classify(finalResult.normalized));
         }
       } catch (e) {
-        console.error('[client-fetch-error]', e);
+        console.error('[fetch-error]', e);
         if (!aborted) {
           setState('fetch_error');
           setPayload({ error: (e as Error).message });
@@ -137,7 +126,7 @@ export default function Page() {
     })();
 
     return () => { aborted = true; };
-  }, [debugMode]);
+  }, [currentArea, coords.lat, coords.lng, debugMode]);
 
   const handleRetry = () => {
     setState('loading');
@@ -180,6 +169,21 @@ export default function Page() {
 
       {/* メインコンテンツ */}
       <main className="max-w-6xl mx-auto px-4 py-6">
+        {/* エリア選択UI（常時表示） */}
+        <div className="mb-6 flex flex-col sm:flex-row sm:items-center gap-4">
+          <AreaSelect 
+            value={currentArea} 
+            onChange={handleAreaChange}
+            disabled={state === 'loading'}
+            className="flex-shrink-0"
+          />
+          <AreaInfo areaKey={currentArea} />
+          {debugMode && (
+            <div className="text-xs text-blue-600 bg-blue-50 px-2 py-1 rounded">
+              Debug: {currentArea} ({coords.lat}, {coords.lng})
+            </div>
+          )}
+        </div>
         {state === 'loading' && (
           <div className="text-center py-12">
             <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
@@ -270,7 +274,13 @@ export default function Page() {
       {debugMode && payload?.debug && (
         <DebugPanel
           data={payload}
-          searchParams={{ area: 'shinjuku', lat: 35.690921, lng: 139.700258, radius: 3 }}
+          searchParams={{ 
+            currentArea: currentArea,
+            area: currentArea, 
+            lat: coords.lat, 
+            lng: coords.lng, 
+            radius: 3 
+          }}
           isVisible={true}
         />
       )}

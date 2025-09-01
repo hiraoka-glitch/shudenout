@@ -10,6 +10,7 @@ interface DebugPanelProps {
     lng?: number;
     radius?: number;
     area?: string;
+    currentArea?: string;
   };
   isVisible: boolean;
 }
@@ -53,9 +54,10 @@ export default function DebugPanel({ data, searchParams, isVisible }: DebugPanel
           <div className="mb-3">
             <h3 className="text-yellow-400 font-bold mb-1">🔍 Search Params</h3>
             <div className="space-y-1">
-              <div>area: <span className="text-cyan-400">{String(finalSearchParams?.area || 'N/A')}</span></div>
+              <div>area: <span className="text-green-400">{String(finalSearchParams?.area || searchParams.currentArea || 'N/A')}</span></div>
               <div>lat/lng: <span className="text-cyan-400">{searchParams.lat?.toFixed(6)}, {searchParams.lng?.toFixed(6)}</span></div>
               <div>radius: <span className="text-cyan-400">{String(finalSearchParams?.searchRadius || 'N/A')}</span></div>
+              <div>datum: <span className="text-yellow-400">{String(finalSearchParams?.datumType || '1')} (度)</span></div>
               <div>adults: <span className="text-cyan-400">{String(finalSearchParams?.adultNum || 'N/A')}</span></div>
             </div>
           </div>
